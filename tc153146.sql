@@ -1,31 +1,71 @@
+```sql
 --------------------------------------------------------------------------------
--- ORACLE 23ai OPTIMIZER / TRACE LAB
+-- ============================================================================
+-- ORACLE DATABASE 23ai
+-- OPTIMIZER / 10053 / 10046 LEVEL 12 TRAINING LAB
+-- ============================================================================
 --
--- Purpose:
---   10053  : Optimizer decisions / transformations / costing
---   10046  : SQL execution / waits / binds
+-- VERSION: 2.0
 --
--- Designed for:
---   Oracle Database 23ai
+-- PURPOSE
+-- -------
+-- Demonstrate and trace:
 --
--- Run with:
---   SQL*Plus / SQLcl as a user able to:
---      - create tables/indexes
---      - execute DBMS_STATS
---      - alter session set events
+-- JOIN METHODS
+--   T01  Nested Loop
+--   T02  Hash Join
+--   T03  Sort Merge Join
+--   T04  Cartesian Join
 --
--- Recommended:
---   SET SERVEROUTPUT ON
---   SET LINESIZE 250
---   SET PAGESIZE 100
+-- QUERY TRANSFORMATIONS
+--   T05  View Merging
+--   T06  NO_MERGE
+--   T07  Subquery Unnesting
+--   T08  NO_UNNEST
+--   T09  Predicate Pushing
+--   T10  OR Expansion
+--   T11  Join Elimination
+--   T12  Predicate Transitivity
 --
--- Trace files are generated in the Oracle diagnostic destination.
--- Use:
---   SELECT value FROM v$diag_info WHERE name = 'Default Trace File';
+-- ACCESS PATH / STATISTICS
+--   T13  Missing Index
+--   T14  Missing Statistics
+--   T15  Stale Statistics
+--   T16  Bad Table Statistics
+--   T17  Cardinality Misestimate / No Histogram
+--   T18  Histogram
+--   T19  Clustering Factor
+--   T20  Selective Index
+--   T21  Non-selective Index
+--   T22  Index vs Full Scan
+--   T23  Function on Column
+--   T24  SARGable Predicate
+--
+-- ADAPTIVE / JOIN ORDER
+--   T25  Adaptive Plan
+--   T26  Join Order
+--   T27  Forced Join Order
+--   T28  NL vs HASH
+--   T29  Combined Transformations
+--   T30  Bad Cardinality + Join
+--
+-- TRACING
+-- --------
+-- 10053 = Optimizer decision / costing / transformation trace
+-- 10046 = SQL trace, waits and binds
+--
+-- IMPORTANT
+-- ---------
+-- 1. Every SQL statement has a unique LAB tag.
+-- 2. SQL_ID is retrieved from V$SQL using the tag.
+-- 3. DBMS_XPLAN.DISPLAY_CURSOR is called with exact SQL_ID + child number.
+-- 4. We NEVER use DISPLAY_CURSOR(NULL,NULL).
+-- 5. Do not use multiline SQL*Plus EXEC syntax.
+-- 6. Each show_test_plan call is one line.
 --
 --------------------------------------------------------------------------------
 
-SET SERVEROUTPUT ON
+SET SERVEROUTPUT ON SIZE UNLIMITED
 SET LINESIZE 250
 SET PAGESIZE 100
 SET LONG 1000000
@@ -33,18 +73,71 @@ SET LONGCHUNKSIZE 1000000
 SET TAB OFF
 SET VERIFY OFF
 SET FEEDBACK ON
+SET TIMING ON
 
 ALTER SESSION SET statistics_level = ALL;
+ALTER SESSION SET cursor_sharing = EXACT;
 
 --------------------------------------------------------------------------------
--- 0. CLEANUP
+-- ============================================================================
+-- SECTION 0 - SESSION INFORMATION
+-- ============================================================================
+--------------------------------------------------------------------------------
+
+PROMPT
+PROMPT ============================================================
+PROMPT SESSION INFORMATION
+PROMPT ============================================================
+
+SELECT
+    SYS_CONTEXT('USERENV','DB_NAME')       AS db_name,
+    SYS_CONTEXT('USERENV','CURRENT_USER')  AS username,
+    SYS_CONTEXT('USERENV','SID')           AS sid,
+    SYS_CONTEXT('USERENV','INSTANCE_NAME') AS instance_name
+FROM dual;
+
+--------------------------------------------------------------------------------
+-- ============================================================================
+-- SECTION 1 - DISABLE TRACE IF LEFT ON FROM PREVIOUS RUN
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 BEGIN
-    FOR t IN (
-        SELECT table_name
-        FROM user_tables
-        WHERE table_name IN (
+    EXECUTE IMMEDIATE
+        'ALTER SESSION SET EVENTS ''10053 trace name context off''';
+EXCEPTION
+    WHEN OTHERS THEN NULL;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE
+        'ALTER SESSION SET EVENTS ''10046 trace name context off''';
+EXCEPTION
+    WHEN OTHERS THEN NULL;
+END;
+/
+
+--------------------------------------------------------------------------------
+-- ============================================================================
+-- SECTION 2 - CLEAN OLD OBJECTS
+-- ============================================================================
+--------------------------------------------------------------------------------
+
+PROMPT
+PROMPT ============================================================
+PROMPT DROPPING OLD LAB OBJECTS
+PROMPT ============================================================
+
+BEGIN
+
+    FOR r IN
+    (
+        SELECT object_name,
+               object_type
+        FROM user_objects
+        WHERE object_name IN
+        (
             'OJ_DEPT',
             'OJ_EMP',
             'OJ_CUSTOMER',
@@ -54,31 +147,60 @@ BEGIN
             'OJ_SALES',
             'OJ_BIG',
             'OJ_SMALL',
-            'OJ_SKEW'
+            'OJ_SKEW',
+            'OJ_NO_STATS',
+            'OJ_STALE',
+            'OJ_CLUSTERING',
+            'OJ_TRACE_RESULTS'
         )
+        ORDER BY
+            CASE object_type
+                WHEN 'TABLE' THEN 1
+                ELSE 2
+            END
     )
     LOOP
+
         BEGIN
-            EXECUTE IMMEDIATE
-                'DROP TABLE ' || t.table_name || ' CASCADE CONSTRAINTS PURGE';
+
+            IF r.object_type = 'TABLE' THEN
+
+                EXECUTE IMMEDIATE
+                    'DROP TABLE ' ||
+                    r.object_name ||
+                    ' CASCADE CONSTRAINTS PURGE';
+
+            END IF;
+
         EXCEPTION
             WHEN OTHERS THEN NULL;
         END;
+
     END LOOP;
+
 END;
 /
 
 --------------------------------------------------------------------------------
--- 1. BASE TABLES
+-- ============================================================================
+-- SECTION 3 - CREATE TABLES
+-- ============================================================================
 --------------------------------------------------------------------------------
 
-CREATE TABLE oj_dept (
+PROMPT
+PROMPT ============================================================
+PROMPT CREATING TABLES
+PROMPT ============================================================
+
+CREATE TABLE oj_dept
+(
     dept_id       NUMBER PRIMARY KEY,
     dept_name     VARCHAR2(100),
     region        VARCHAR2(30)
 );
 
-CREATE TABLE oj_emp (
+CREATE TABLE oj_emp
+(
     emp_id        NUMBER PRIMARY KEY,
     dept_id       NUMBER,
     emp_name      VARCHAR2(100),
@@ -88,7 +210,8 @@ CREATE TABLE oj_emp (
     status        VARCHAR2(20)
 );
 
-CREATE TABLE oj_customer (
+CREATE TABLE oj_customer
+(
     customer_id   NUMBER PRIMARY KEY,
     customer_name VARCHAR2(100),
     region        VARCHAR2(30),
@@ -96,7 +219,8 @@ CREATE TABLE oj_customer (
     status        VARCHAR2(20)
 );
 
-CREATE TABLE oj_orders (
+CREATE TABLE oj_orders
+(
     order_id      NUMBER PRIMARY KEY,
     customer_id   NUMBER,
     order_date    DATE,
@@ -104,27 +228,27 @@ CREATE TABLE oj_orders (
     amount        NUMBER
 );
 
-CREATE TABLE oj_order_items (
+CREATE TABLE oj_order_items
+(
     order_id      NUMBER,
     line_id       NUMBER,
     product_id    NUMBER,
     quantity      NUMBER,
     price         NUMBER,
-    CONSTRAINT oj_order_items_pk PRIMARY KEY(order_id,line_id)
+    CONSTRAINT oj_order_items_pk
+        PRIMARY KEY (order_id,line_id)
 );
 
-CREATE TABLE oj_product (
+CREATE TABLE oj_product
+(
     product_id    NUMBER PRIMARY KEY,
     product_name  VARCHAR2(100),
     category      VARCHAR2(30),
     price         NUMBER
 );
 
---------------------------------------------------------------------------------
--- Tables for specific optimizer pathologies
---------------------------------------------------------------------------------
-
-CREATE TABLE oj_sales (
+CREATE TABLE oj_sales
+(
     sale_id       NUMBER PRIMARY KEY,
     customer_id   NUMBER,
     sale_date     DATE,
@@ -134,217 +258,200 @@ CREATE TABLE oj_sales (
     flag          VARCHAR2(1)
 );
 
-CREATE TABLE oj_big (
+CREATE TABLE oj_big
+(
     id            NUMBER PRIMARY KEY,
     group_id      NUMBER,
     payload       VARCHAR2(100)
 );
 
-CREATE TABLE oj_small (
+CREATE TABLE oj_small
+(
     id            NUMBER PRIMARY KEY,
     group_id      NUMBER,
     payload       VARCHAR2(100)
 );
 
-CREATE TABLE oj_skew (
+CREATE TABLE oj_skew
+(
     id            NUMBER PRIMARY KEY,
     skew_col      NUMBER,
     payload       VARCHAR2(100)
 );
 
 --------------------------------------------------------------------------------
--- 2. DATA GENERATION
+-- ============================================================================
+-- SECTION 4 - GENERATE DATA
+-- ============================================================================
 --------------------------------------------------------------------------------
 
-BEGIN
-    --------------------------------------------------------------------------
-    -- Departments
-    --------------------------------------------------------------------------
-    INSERT INTO oj_dept
-    SELECT level,
-           'DEPT_' || level,
-           CASE MOD(level,4)
-             WHEN 0 THEN 'NORTH'
-             WHEN 1 THEN 'SOUTH'
-             WHEN 2 THEN 'EAST'
-             ELSE 'WEST'
-           END
+PROMPT
+PROMPT ============================================================
+PROMPT GENERATING DATA
+PROMPT ============================================================
+
+INSERT INTO oj_dept
+SELECT level,
+       'DEPT_' || level,
+       CASE MOD(level,4)
+           WHEN 0 THEN 'NORTH'
+           WHEN 1 THEN 'SOUTH'
+           WHEN 2 THEN 'EAST'
+           ELSE 'WEST'
+       END
+FROM dual
+CONNECT BY level <= 100;
+
+
+INSERT INTO oj_emp
+SELECT level,
+       MOD(level,100) + 1,
+       'EMP_' || level,
+       CASE MOD(level,5)
+           WHEN 0 THEN 'MANAGER'
+           WHEN 1 THEN 'ENGINEER'
+           WHEN 2 THEN 'ANALYST'
+           WHEN 3 THEN 'CLERK'
+           ELSE 'SALES'
+       END,
+       30000 + MOD(level * 7919,120000),
+       DATE '2015-01-01' + MOD(level,3500),
+       CASE
+           WHEN MOD(level,20) = 0 THEN 'INACTIVE'
+           ELSE 'ACTIVE'
+       END
+FROM dual
+CONNECT BY level <= 100000;
+
+
+INSERT INTO oj_customer
+SELECT level,
+       'CUSTOMER_' || level,
+       CASE MOD(level,5)
+           WHEN 0 THEN 'NORTH'
+           WHEN 1 THEN 'SOUTH'
+           WHEN 2 THEN 'EAST'
+           WHEN 3 THEN 'WEST'
+           ELSE 'CENTRAL'
+       END,
+       CASE
+           WHEN MOD(level,10) IN (0,1)
+           THEN 'VIP'
+           ELSE 'STANDARD'
+       END,
+       CASE
+           WHEN MOD(level,25) = 0
+           THEN 'INACTIVE'
+           ELSE 'ACTIVE'
+       END
+FROM dual
+CONNECT BY level <= 50000;
+
+
+INSERT INTO oj_product
+SELECT level,
+       'PRODUCT_' || level,
+       CASE MOD(level,6)
+           WHEN 0 THEN 'ELECTRONICS'
+           WHEN 1 THEN 'BOOKS'
+           WHEN 2 THEN 'HOME'
+           WHEN 3 THEN 'SPORTS'
+           WHEN 4 THEN 'OFFICE'
+           ELSE 'OTHER'
+       END,
+       10 + MOD(level * 37,1000)
+FROM dual
+CONNECT BY level <= 1000;
+
+
+INSERT INTO oj_orders
+SELECT level,
+       MOD(level * 13,50000) + 1,
+       DATE '2024-01-01' + MOD(level,700),
+       CASE MOD(level,10)
+           WHEN 0 THEN 'CANCELLED'
+           WHEN 1 THEN 'PENDING'
+           ELSE 'COMPLETE'
+       END,
+       10 + MOD(level * 97,10000)
+FROM dual
+CONNECT BY level <= 500000;
+
+
+INSERT INTO oj_order_items
+SELECT o.order_id,
+       x.line_id,
+       MOD(o.order_id * 17 + x.line_id * 31,1000) + 1,
+       MOD(o.order_id + x.line_id,10) + 1,
+       10 + MOD(o.order_id * 13 + x.line_id * 7,1000)
+FROM oj_orders o
+CROSS JOIN
+(
+    SELECT level line_id
     FROM dual
-    CONNECT BY level <= 100;
+    CONNECT BY level <= 3
+) x;
 
 
-    --------------------------------------------------------------------------
-    -- Employees: 100,000 rows
-    --------------------------------------------------------------------------
-    INSERT INTO oj_emp
-    SELECT level,
-           MOD(level,100) + 1,
-           'EMP_' || level,
-           CASE MOD(level,5)
-             WHEN 0 THEN 'MANAGER'
-             WHEN 1 THEN 'ENGINEER'
-             WHEN 2 THEN 'ANALYST'
-             WHEN 3 THEN 'CLERK'
-             ELSE 'SALES'
-           END,
-           30000 + MOD(level * 7919,120000),
-           DATE '2015-01-01' + MOD(level,3500),
-           CASE
-             WHEN MOD(level,20) = 0 THEN 'INACTIVE'
-             ELSE 'ACTIVE'
-           END
-    FROM dual
-    CONNECT BY level <= 100000;
+INSERT INTO oj_sales
+SELECT level,
+       MOD(level * 13,50000) + 1,
+       DATE '2024-01-01' + MOD(level,700),
+       CASE MOD(level,5)
+           WHEN 0 THEN 'NORTH'
+           WHEN 1 THEN 'SOUTH'
+           WHEN 2 THEN 'EAST'
+           WHEN 3 THEN 'WEST'
+           ELSE 'CENTRAL'
+       END,
+       MOD(level * 17,1000) + 1,
+       1 + MOD(level * 7919,5000),
+       CASE
+           WHEN MOD(level,100) = 0 THEN 'Y'
+           ELSE 'N'
+       END
+FROM dual
+CONNECT BY level <= 1000000;
 
 
-    --------------------------------------------------------------------------
-    -- Customers: 50,000
-    --------------------------------------------------------------------------
-    INSERT INTO oj_customer
-    SELECT level,
-           'CUSTOMER_' || level,
-           CASE MOD(level,5)
-             WHEN 0 THEN 'NORTH'
-             WHEN 1 THEN 'SOUTH'
-             WHEN 2 THEN 'EAST'
-             WHEN 3 THEN 'WEST'
-             ELSE 'CENTRAL'
-           END,
-           CASE MOD(level,10)
-             WHEN 0 THEN 'VIP'
-             WHEN 1 THEN 'VIP'
-             ELSE 'STANDARD'
-           END,
-           CASE
-             WHEN MOD(level,25)=0 THEN 'INACTIVE'
-             ELSE 'ACTIVE'
-           END
-    FROM dual
-    CONNECT BY level <= 50000;
+INSERT INTO oj_big
+SELECT level,
+       MOD(level,10000),
+       RPAD('BIG',100,'X')
+FROM dual
+CONNECT BY level <= 1000000;
 
 
-    --------------------------------------------------------------------------
-    -- Products
-    --------------------------------------------------------------------------
-    INSERT INTO oj_product
-    SELECT level,
-           'PRODUCT_' || level,
-           CASE MOD(level,6)
-             WHEN 0 THEN 'ELECTRONICS'
-             WHEN 1 THEN 'BOOKS'
-             WHEN 2 THEN 'HOME'
-             WHEN 3 THEN 'SPORTS'
-             WHEN 4 THEN 'OFFICE'
-             ELSE 'OTHER'
-           END,
-           10 + MOD(level * 37,1000)
-    FROM dual
-    CONNECT BY level <= 1000;
+INSERT INTO oj_small
+SELECT level,
+       MOD(level,10000),
+       RPAD('SMALL',100,'Y')
+FROM dual
+CONNECT BY level <= 10000;
 
 
-    --------------------------------------------------------------------------
-    -- Orders: 500,000
-    --------------------------------------------------------------------------
-    INSERT INTO oj_orders
-    SELECT level,
-           MOD(level * 13,50000) + 1,
-           DATE '2024-01-01' + MOD(level,700),
-           CASE MOD(level,10)
-             WHEN 0 THEN 'CANCELLED'
-             WHEN 1 THEN 'PENDING'
-             ELSE 'COMPLETE'
-           END,
-           10 + MOD(level * 97,10000)
-    FROM dual
-    CONNECT BY level <= 500000;
+INSERT INTO oj_skew
+SELECT level,
+       CASE
+           WHEN level <= 99000 THEN 1
+           ELSE MOD(level,1000) + 2
+       END,
+       RPAD('SKEW',100,'S')
+FROM dual
+CONNECT BY level <= 100000;
 
-
-    --------------------------------------------------------------------------
-    -- Order items: 1.5M
-    --------------------------------------------------------------------------
-    INSERT INTO oj_order_items
-    SELECT o.order_id,
-           x.line_id,
-           MOD(o.order_id * 17 + x.line_id * 31,1000) + 1,
-           MOD(o.order_id + x.line_id,10) + 1,
-           10 + MOD(o.order_id * 13 + x.line_id * 7,1000)
-    FROM oj_orders o
-    CROSS JOIN (
-        SELECT level line_id
-        FROM dual
-        CONNECT BY level <= 3
-    ) x;
-
-
-    --------------------------------------------------------------------------
-    -- Sales: 1M rows
-    --------------------------------------------------------------------------
-    INSERT INTO oj_sales
-    SELECT level,
-           MOD(level * 13,50000)+1,
-           DATE '2024-01-01' + MOD(level,700),
-           CASE MOD(level,5)
-             WHEN 0 THEN 'NORTH'
-             WHEN 1 THEN 'SOUTH'
-             WHEN 2 THEN 'EAST'
-             WHEN 3 THEN 'WEST'
-             ELSE 'CENTRAL'
-           END,
-           MOD(level * 17,1000)+1,
-           1 + MOD(level * 7919,5000),
-           CASE
-             WHEN MOD(level,100)=0 THEN 'Y'
-             ELSE 'N'
-           END
-    FROM dual
-    CONNECT BY level <= 1000000;
-
-
-    --------------------------------------------------------------------------
-    -- Big table: 1M rows
-    --------------------------------------------------------------------------
-    INSERT INTO oj_big
-    SELECT level,
-           MOD(level,10000),
-           RPAD('BIG',100,'X')
-    FROM dual
-    CONNECT BY level <= 1000000;
-
-
-    --------------------------------------------------------------------------
-    -- Small table: 10,000 rows
-    --------------------------------------------------------------------------
-    INSERT INTO oj_small
-    SELECT level,
-           MOD(level,10000),
-           RPAD('SMALL',100,'Y')
-    FROM dual
-    CONNECT BY level <= 10000;
-
-
-    --------------------------------------------------------------------------
-    -- Highly skewed table
-    --
-    -- 99% = 1
-    -- 1%  = values 2..1001
-    --------------------------------------------------------------------------
-    INSERT INTO oj_skew
-    SELECT level,
-           CASE
-             WHEN level <= 99000 THEN 1
-             ELSE MOD(level,1000)+2
-           END,
-           RPAD('SKEW',100,'S')
-    FROM dual
-    CONNECT BY level <= 100000;
-
-    COMMIT;
-END;
-/
+COMMIT;
 
 --------------------------------------------------------------------------------
--- 3. INDEXES
+-- ============================================================================
+-- SECTION 5 - INDEXES
+-- ============================================================================
 --------------------------------------------------------------------------------
+
+PROMPT
+PROMPT ============================================================
+PROMPT CREATING INDEXES
+PROMPT ============================================================
 
 CREATE INDEX oj_emp_dept_i
     ON oj_emp(dept_id);
@@ -383,40 +490,96 @@ CREATE INDEX oj_skew_col_i
     ON oj_skew(skew_col);
 
 --------------------------------------------------------------------------------
--- 4. INITIAL GOOD STATISTICS
+-- ============================================================================
+-- SECTION 6 - FOREIGN KEY FOR JOIN ELIMINATION EXPERIMENT
+-- ============================================================================
 --------------------------------------------------------------------------------
 
+ALTER TABLE oj_orders
+ADD CONSTRAINT oj_orders_customer_fk
+FOREIGN KEY (customer_id)
+REFERENCES oj_customer(customer_id);
+
+--------------------------------------------------------------------------------
+-- ============================================================================
+-- SECTION 7 - GATHER GOOD INITIAL STATISTICS
+-- ============================================================================
+--------------------------------------------------------------------------------
+
+PROMPT
+PROMPT ============================================================
+PROMPT GATHERING INITIAL STATISTICS
+PROMPT ============================================================
+
 BEGIN
-    DBMS_STATS.GATHER_SCHEMA_STATS(
+
+    DBMS_STATS.GATHER_SCHEMA_STATS
+    (
         ownname          => USER,
         estimate_percent => DBMS_STATS.AUTO_SAMPLE_SIZE,
         method_opt       => 'FOR ALL COLUMNS SIZE AUTO',
         cascade          => TRUE,
         no_invalidate    => FALSE
     );
+
 END;
 /
 
 --------------------------------------------------------------------------------
--- Helper procedure
+-- ============================================================================
+-- SECTION 8 - RESULT TABLE
+-- ============================================================================
 --------------------------------------------------------------------------------
 
-CREATE OR REPLACE PROCEDURE trace_on(
-    p_test_id VARCHAR2
+CREATE TABLE oj_trace_results
+(
+    test_id           VARCHAR2(100),
+    test_description  VARCHAR2(500),
+    run_time          TIMESTAMP,
+    sql_id            VARCHAR2(13),
+    child_number      NUMBER,
+    plan_hash_value   NUMBER,
+    executions        NUMBER,
+    elapsed_time_us   NUMBER,
+    cpu_time_us       NUMBER,
+    buffer_gets       NUMBER,
+    disk_reads        NUMBER,
+    rows_processed    NUMBER,
+    trace_file        VARCHAR2(1000)
+);
+
+--------------------------------------------------------------------------------
+-- ============================================================================
+-- SECTION 9 - TRACE ON
+-- ============================================================================
+--------------------------------------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE trace_on
+(
+    p_test_id IN VARCHAR2
 )
 IS
 BEGIN
+
     DBMS_OUTPUT.PUT_LINE('');
-    DBMS_OUTPUT.PUT_LINE('====================================================');
-    DBMS_OUTPUT.PUT_LINE('STARTING TEST: ' || p_test_id);
-    DBMS_OUTPUT.PUT_LINE('====================================================');
+    DBMS_OUTPUT.PUT_LINE(
+        '============================================================'
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        'TRACE ON: ' || p_test_id
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        '============================================================'
+    );
 
     /*
        10053:
-          Optimizer trace.
+       Optimizer trace.
 
        10046 level 12:
-          SQL trace + waits + binds.
+       SQL trace + waits + binds.
     */
 
     EXECUTE IMMEDIATE
@@ -424,34 +587,317 @@ BEGIN
 
     EXECUTE IMMEDIATE
         'ALTER SESSION SET EVENTS ''10046 trace name context forever, level 12''';
+
 END;
 /
+
+--------------------------------------------------------------------------------
+-- ============================================================================
+-- SECTION 10 - TRACE OFF
+-- ============================================================================
+--------------------------------------------------------------------------------
 
 CREATE OR REPLACE PROCEDURE trace_off
 IS
 BEGIN
+
     EXECUTE IMMEDIATE
         'ALTER SESSION SET EVENTS ''10053 trace name context off''';
 
     EXECUTE IMMEDIATE
         'ALTER SESSION SET EVENTS ''10046 trace name context off''';
 
-    DBMS_OUTPUT.PUT_LINE('TRACE OFF');
 END;
 /
 
 --------------------------------------------------------------------------------
--- 5. TEST 01 - NESTED LOOP JOIN
+-- ============================================================================
+-- SECTION 11 - SHOW EXACT TEST PLAN
 --
--- Goal:
---   Small driving row source + indexed lookup into larger table.
+-- This is the critical fix.
 --
--- Look in 10053 for:
---   - Join order
---   - NL costing
---   - Index access cost
---   - Cardinality
---   - Join cardinality
+-- NEVER:
+--
+--   DBMS_XPLAN.DISPLAY_CURSOR(NULL,NULL,...)
+--
+-- Instead:
+--
+--   find SQL_ID from V$SQL
+--   find CHILD_NUMBER
+--   pass both explicitly.
+-- ============================================================================
+--------------------------------------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE show_test_plan
+(
+    p_test_id     IN VARCHAR2,
+    p_description IN VARCHAR2 DEFAULT NULL
+)
+IS
+
+    l_sql_id          VARCHAR2(13);
+    l_child_number    NUMBER;
+    l_plan_hash       NUMBER;
+    l_executions      NUMBER;
+    l_elapsed         NUMBER;
+    l_cpu_time        NUMBER;
+    l_buffer_gets     NUMBER;
+    l_disk_reads      NUMBER;
+    l_rows_processed  NUMBER;
+    l_trace_file      VARCHAR2(1000);
+
+BEGIN
+
+    /*
+       Find most recently active cursor containing our LAB tag.
+
+       DBMS_OUTPUT.GET_LINES cannot match the tag,
+       so it cannot be accidentally selected.
+    */
+
+    BEGIN
+
+        SELECT sql_id,
+               child_number,
+               plan_hash_value,
+               executions,
+               elapsed_time,
+               cpu_time,
+               buffer_gets,
+               disk_reads,
+               rows_processed
+        INTO   l_sql_id,
+               l_child_number,
+               l_plan_hash,
+               l_executions,
+               l_elapsed,
+               l_cpu_time,
+               l_buffer_gets,
+               l_disk_reads,
+               l_rows_processed
+        FROM
+        (
+            SELECT sql_id,
+                   child_number,
+                   plan_hash_value,
+                   executions,
+                   elapsed_time,
+                   cpu_time,
+                   buffer_gets,
+                   disk_reads,
+                   rows_processed,
+                   last_active_time
+            FROM v$sql
+            WHERE UPPER(sql_text) LIKE '%' ||
+                  UPPER(p_test_id) ||
+                  '%'
+            AND sql_text NOT LIKE '%OJ_TRACE_RESULTS%'
+            ORDER BY last_active_time DESC
+        )
+        WHERE ROWNUM = 1;
+
+    EXCEPTION
+
+        WHEN NO_DATA_FOUND THEN
+
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE(
+                'ERROR: SQL_ID not found for test: ' ||
+                p_test_id
+            );
+
+            DBMS_OUTPUT.PUT_LINE(
+                'Search V$SQL manually using the test tag.'
+            );
+
+            RETURN;
+
+    END;
+
+
+    /*
+       Trace file.
+    */
+
+    BEGIN
+
+        SELECT value
+        INTO l_trace_file
+        FROM v$diag_info
+        WHERE name = 'Default Trace File';
+
+    EXCEPTION
+
+        WHEN NO_DATA_FOUND THEN
+            l_trace_file := NULL;
+
+    END;
+
+
+    /*
+       Print metadata.
+    */
+
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE(
+        '------------------------------------------------------------'
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        'TEST ID       : ' || p_test_id
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        'DESCRIPTION   : ' || p_description
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        'SQL_ID        : ' || l_sql_id
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        'CHILD NUMBER  : ' || l_child_number
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        'PLAN HASH      : ' || l_plan_hash
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        'EXECUTIONS    : ' || l_executions
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        'ELAPSED (us)  : ' || l_elapsed
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        'CPU (us)      : ' || l_cpu_time
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        'BUFFER GETS   : ' || l_buffer_gets
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        'DISK READS    : ' || l_disk_reads
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        'ROWS          : ' || l_rows_processed
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        'TRACE FILE    : ' || l_trace_file
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        '------------------------------------------------------------'
+    );
+
+
+    /*
+       Store result.
+    */
+
+    INSERT INTO oj_trace_results
+    (
+        test_id,
+        test_description,
+        run_time,
+        sql_id,
+        child_number,
+        plan_hash_value,
+        executions,
+        elapsed_time_us,
+        cpu_time_us,
+        buffer_gets,
+        disk_reads,
+        rows_processed,
+        trace_file
+    )
+    VALUES
+    (
+        p_test_id,
+        p_description,
+        SYSTIMESTAMP,
+        l_sql_id,
+        l_child_number,
+        l_plan_hash,
+        l_executions,
+        l_elapsed,
+        l_cpu_time,
+        l_buffer_gets,
+        l_disk_reads,
+        l_rows_processed,
+        l_trace_file
+    );
+
+    COMMIT;
+
+
+    /*
+       Display exact cursor.
+    */
+
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE(
+        'EXECUTION PLAN'
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        '--------------'
+    );
+
+    FOR r IN
+    (
+        SELECT plan_table_output
+        FROM TABLE
+        (
+            DBMS_XPLAN.DISPLAY_CURSOR
+            (
+                l_sql_id,
+                l_child_number,
+                'ALLSTATS LAST +OUTLINE +NOTE +PEEKED_BINDS +REPORT'
+            )
+        )
+    )
+    LOOP
+
+        DBMS_OUTPUT.PUT_LINE(
+            r.plan_table_output
+        );
+
+    END LOOP;
+
+END;
+/
+
+--------------------------------------------------------------------------------
+-- ============================================================================
+-- SECTION 12 - TRACE FILE INFORMATION
+-- ============================================================================
+--------------------------------------------------------------------------------
+
+PROMPT
+PROMPT ============================================================
+PROMPT TRACE DIRECTORY
+PROMPT ============================================================
+
+SELECT name,
+       value
+FROM v$diag_info
+WHERE name IN
+(
+    'Diag Trace',
+    'Default Trace File',
+    'Default Trace Directory'
+);
+
+--------------------------------------------------------------------------------
+-- ============================================================================
+-- T01 - NESTED LOOP
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T01_NESTED_LOOP');
@@ -469,22 +915,17 @@ WHERE c.customer_id <= 10;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE +PEEKED_BINDS'
-    )
-);
+EXEC show_test_plan('T01_NESTED_LOOP','Nested Loop Join');
 
 --------------------------------------------------------------------------------
--- 6. TEST 02 - HASH JOIN
+-- T02 - HASH JOIN
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T02_HASH_JOIN');
 
 SELECT /* T02_HASH_JOIN */
-       /*+ USE_HASH(o c) */
+       /*+ USE_HASH(o) */
        COUNT(*)
 FROM oj_orders o
 JOIN oj_customer c
@@ -493,23 +934,11 @@ WHERE o.order_date >= DATE '2025-01-01';
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T02_HASH_JOIN','Hash Join');
 
 --------------------------------------------------------------------------------
--- 7. TEST 03 - SORT MERGE JOIN
---
--- USE_MERGE makes this deterministic for the lab.
---
--- 10053 lets you examine:
---   - Sort cost
---   - Merge join costing
---   - Join order
+-- T03 - SORT MERGE JOIN
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T03_SORT_MERGE');
@@ -524,29 +953,20 @@ WHERE s.sale_date >= DATE '2025-01-01';
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T03_SORT_MERGE','Sort Merge Join');
 
 --------------------------------------------------------------------------------
--- 8. TEST 04 - CARTESIAN JOIN
---
--- Deliberately no join predicate.
---
--- 10053:
---   Search for Cartesian / join order / cost.
+-- T04 - CARTESIAN JOIN
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T04_CARTESIAN');
 
 SELECT /* T04_CARTESIAN */
-       /*+ LEADING(c p) */
+       /*+ USE_NL(p) */
        COUNT(*)
-FROM (
+FROM
+(
     SELECT *
     FROM oj_customer
     WHERE customer_id <= 100
@@ -559,20 +979,11 @@ FROM (
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T04_CARTESIAN','Cartesian Join');
 
 --------------------------------------------------------------------------------
--- 9. TEST 05 - VIEW MERGING
---
--- Inline view should normally be mergeable.
---
--- Compare with T06 where NO_MERGE prevents merging.
+-- T05 - VIEW MERGING
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T05_VIEW_MERGING');
@@ -580,7 +991,8 @@ EXEC trace_on('T05_VIEW_MERGING');
 SELECT /* T05_VIEW_MERGING */
        v.customer_id,
        v.cnt
-FROM (
+FROM
+(
     SELECT customer_id,
            COUNT(*) cnt
     FROM oj_orders
@@ -590,25 +1002,21 @@ WHERE v.customer_id <= 100;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T05_VIEW_MERGING','View Merging');
 
 --------------------------------------------------------------------------------
--- 10. TEST 06 - VIEW MERGING DISABLED
+-- T06 - NO VIEW MERGING
+-- ============================================================================
 --------------------------------------------------------------------------------
 
-EXEC trace_on('T06_NO_VIEW_MERGING');
+EXEC trace_on('T06_NO_MERGE');
 
-SELECT /* T06_NO_VIEW_MERGING */
+SELECT /* T06_NO_MERGE */
        /*+ NO_MERGE(v) */
        v.customer_id,
        v.cnt
-FROM (
+FROM
+(
     SELECT customer_id,
            COUNT(*) cnt
     FROM oj_orders
@@ -618,16 +1026,11 @@ WHERE v.customer_id <= 100;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T06_NO_MERGE','View Merging Disabled');
 
 --------------------------------------------------------------------------------
--- 11. TEST 07 - SUBQUERY UNNESTING
+-- T07 - SUBQUERY UNNESTING
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T07_SUBQUERY_UNNESTING');
@@ -635,7 +1038,8 @@ EXEC trace_on('T07_SUBQUERY_UNNESTING');
 SELECT /* T07_SUBQUERY_UNNESTING */
        COUNT(*)
 FROM oj_customer c
-WHERE EXISTS (
+WHERE EXISTS
+(
     SELECT 1
     FROM oj_orders o
     WHERE o.customer_id = c.customer_id
@@ -644,16 +1048,11 @@ WHERE EXISTS (
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T07_SUBQUERY_UNNESTING','Subquery Unnesting');
 
 --------------------------------------------------------------------------------
--- 12. TEST 08 - NO UNNEST
+-- T08 - NO UNNEST
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T08_NO_UNNEST');
@@ -662,7 +1061,8 @@ SELECT /* T08_NO_UNNEST */
        /*+ NO_UNNEST */
        COUNT(*)
 FROM oj_customer c
-WHERE EXISTS (
+WHERE EXISTS
+(
     SELECT 1
     FROM oj_orders o
     WHERE o.customer_id = c.customer_id
@@ -671,16 +1071,11 @@ WHERE EXISTS (
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T08_NO_UNNEST','Subquery Unnesting Disabled');
 
 --------------------------------------------------------------------------------
--- 13. TEST 09 - PREDICATE PUSHING
+-- T09 - PREDICATE PUSHING
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T09_PREDICATE_PUSHING');
@@ -688,26 +1083,22 @@ EXEC trace_on('T09_PREDICATE_PUSHING');
 SELECT /* T09_PREDICATE_PUSHING */
        v.customer_id,
        v.total_amount
-FROM (
-    SELECT o.customer_id,
-           SUM(o.amount) total_amount
-    FROM oj_orders o
-    GROUP BY o.customer_id
+FROM
+(
+    SELECT customer_id,
+           SUM(amount) total_amount
+    FROM oj_orders
+    GROUP BY customer_id
 ) v
 WHERE v.customer_id BETWEEN 100 AND 200;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T09_PREDICATE_PUSHING','Predicate Pushing');
 
 --------------------------------------------------------------------------------
--- 14. TEST 10 - OR EXPANSION
+-- T10 - OR EXPANSION
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T10_OR_EXPANSION');
@@ -721,18 +1112,11 @@ WHERE customer_id = 100
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T10_OR_EXPANSION','OR Expansion');
 
 --------------------------------------------------------------------------------
--- 15. TEST 11 - JOIN ELIMINATION
---
--- The query does not actually need columns from CUSTOMER.
+-- T11 - JOIN ELIMINATION
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T11_JOIN_ELIMINATION');
@@ -746,21 +1130,16 @@ WHERE o.amount > 9000;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T11_JOIN_ELIMINATION','Join Elimination Candidate');
 
 --------------------------------------------------------------------------------
--- 16. TEST 12 - PREDICATE TRANSTIVITY
+-- T12 - PREDICATE TRANSITIVITY
+-- ============================================================================
 --------------------------------------------------------------------------------
 
-EXEC trace_on('T12_PREDICATE_TRANSTIVITY');
+EXEC trace_on('T12_PREDICATE_TRANSITIVITY');
 
-SELECT /* T12_PREDICATE_TRANSTIVITY */
+SELECT /* T12_PREDICATE_TRANSITIVITY */
        COUNT(*)
 FROM oj_orders o
 JOIN oj_customer c
@@ -769,18 +1148,11 @@ WHERE c.customer_id = 12345;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T12_PREDICATE_TRANSITIVITY','Predicate Transitivity');
 
 --------------------------------------------------------------------------------
--- 17. TEST 13 - MISSING INDEX
---
--- Drop the useful index first.
+-- T13 - MISSING INDEX
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 DROP INDEX oj_orders_customer_i;
@@ -788,7 +1160,6 @@ DROP INDEX oj_orders_customer_i;
 EXEC trace_on('T13_MISSING_INDEX');
 
 SELECT /* T13_MISSING_INDEX */
-       /*+ LEADING(c o) */
        COUNT(*)
 FROM oj_customer c
 JOIN oj_orders o
@@ -797,31 +1168,21 @@ WHERE c.customer_id BETWEEN 1 AND 10;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
-
---------------------------------------------------------------------------------
--- Restore index
---------------------------------------------------------------------------------
+EXEC show_test_plan('T13_MISSING_INDEX','Missing Index');
 
 CREATE INDEX oj_orders_customer_i
     ON oj_orders(customer_id);
 
 --------------------------------------------------------------------------------
--- 18. TEST 14 - MISSING STATISTICS
---
--- Create a new table with no statistics.
+-- T14 - MISSING STATISTICS
+-- ============================================================================
 --------------------------------------------------------------------------------
 
-CREATE TABLE oj_no_stats AS
+CREATE TABLE oj_no_stats
+AS
 SELECT *
 FROM oj_orders
-WHERE 1=0;
+WHERE 1 = 0;
 
 INSERT INTO oj_no_stats
 SELECT *
@@ -829,8 +1190,6 @@ FROM oj_orders
 WHERE order_id <= 100000;
 
 COMMIT;
-
--- Intentionally DO NOT gather stats.
 
 EXEC trace_on('T14_MISSING_STATISTICS');
 
@@ -841,32 +1200,28 @@ WHERE customer_id = 100;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T14_MISSING_STATISTICS','Missing Statistics');
 
 --------------------------------------------------------------------------------
--- 19. TEST 15 - STALE / BAD STATISTICS
---
--- First gather correct statistics.
--- Then insert a large amount of data without gathering statistics.
+-- T15 - STALE STATISTICS
+-- ============================================================================
 --------------------------------------------------------------------------------
 
-CREATE TABLE oj_stale AS
+CREATE TABLE oj_stale
+AS
 SELECT *
 FROM oj_skew;
 
 BEGIN
-    DBMS_STATS.GATHER_TABLE_STATS(
-        ownname => USER,
-        tabname => 'OJ_STALE',
-        cascade => TRUE,
+
+    DBMS_STATS.GATHER_TABLE_STATS
+    (
+        ownname    => USER,
+        tabname    => 'OJ_STALE',
+        cascade    => TRUE,
         method_opt => 'FOR ALL COLUMNS SIZE AUTO'
     );
+
 END;
 /
 
@@ -875,8 +1230,11 @@ SELECT id + 100000,
        skew_col,
        payload
 FROM oj_skew
-CROSS JOIN (
-    SELECT 1 x FROM dual CONNECT BY level <= 5
+CROSS JOIN
+(
+    SELECT 1
+    FROM dual
+    CONNECT BY level <= 5
 );
 
 COMMIT;
@@ -890,41 +1248,35 @@ WHERE skew_col = 1;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T15_STALE_STATISTICS','Stale Statistics');
 
 --------------------------------------------------------------------------------
--- 20. TEST 16 - BAD STATISTICS / WRONG CARDINALITY
---
--- Deliberately manipulate statistics.
---
--- We set NUM_ROWS very differently from reality.
+-- T16 - BAD TABLE STATISTICS
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 BEGIN
-    DBMS_STATS.SET_TABLE_STATS(
+
+    DBMS_STATS.SET_TABLE_STATS
+    (
         ownname => USER,
         tabname => 'OJ_BIG',
         numrows => 100
     );
 
-    DBMS_STATS.SET_TABLE_STATS(
+    DBMS_STATS.SET_TABLE_STATS
+    (
         ownname => USER,
         tabname => 'OJ_SMALL',
         numrows => 100000000
     );
+
 END;
 /
 
 EXEC trace_on('T16_BAD_TABLE_STATS');
 
 SELECT /* T16_BAD_TABLE_STATS */
-       /*+ USE_HASH(b s) */
        COUNT(*)
 FROM oj_big b
 JOIN oj_small s
@@ -932,27 +1284,24 @@ JOIN oj_small s
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T16_BAD_TABLE_STATS','Bad Table Statistics');
 
 --------------------------------------------------------------------------------
--- 21. TEST 17 - CARDINALITY MIS-ESTIMATE FROM SKEW
---
--- We deliberately remove useful histogram information.
+-- T17 - CARDINALITY MIS-ESTIMATE
+--      NO HISTOGRAM
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 BEGIN
-    DBMS_STATS.GATHER_TABLE_STATS(
-        ownname     => USER,
-        tabname     => 'OJ_SKEW',
-        cascade     => TRUE,
-        method_opt  => 'FOR ALL COLUMNS SIZE 1'
+
+    DBMS_STATS.GATHER_TABLE_STATS
+    (
+        ownname    => USER,
+        tabname    => 'OJ_SKEW',
+        cascade    => TRUE,
+        method_opt => 'FOR ALL COLUMNS SIZE 1'
     );
+
 END;
 /
 
@@ -965,27 +1314,23 @@ WHERE skew_col = 1;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T17_CARDINALITY_SKEW','Skewed Column Without Histogram');
 
 --------------------------------------------------------------------------------
--- 22. TEST 18 - GOOD HISTOGRAM
---
--- Compare against T17.
+-- T18 - HISTOGRAM
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 BEGIN
-    DBMS_STATS.GATHER_TABLE_STATS(
-        ownname     => USER,
-        tabname     => 'OJ_SKEW',
-        cascade     => TRUE,
-        method_opt  => 'FOR ALL COLUMNS SIZE 254'
+
+    DBMS_STATS.GATHER_TABLE_STATS
+    (
+        ownname    => USER,
+        tabname    => 'OJ_SKEW',
+        cascade    => TRUE,
+        method_opt => 'FOR ALL COLUMNS SIZE 254'
     );
+
 END;
 /
 
@@ -998,23 +1343,15 @@ WHERE skew_col = 1;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T18_GOOD_HISTOGRAM','Skewed Column With Histogram');
 
 --------------------------------------------------------------------------------
--- 23. TEST 19 - BAD CLUSTERING FACTOR
---
--- Build a table whose physical order is very different from index order.
---
--- We create a copy ordered by another column and then index COL_A.
+-- T19 - CLUSTERING FACTOR
+-- ============================================================================
 --------------------------------------------------------------------------------
 
-CREATE TABLE oj_clustering AS
+CREATE TABLE oj_clustering
+AS
 SELECT level id,
        MOD(level,1000) col_a,
        TRUNC(level/1000) col_b,
@@ -1026,12 +1363,15 @@ CREATE INDEX oj_clustering_i
     ON oj_clustering(col_a);
 
 BEGIN
-    DBMS_STATS.GATHER_TABLE_STATS(
+
+    DBMS_STATS.GATHER_TABLE_STATS
+    (
         ownname    => USER,
         tabname    => 'OJ_CLUSTERING',
         cascade    => TRUE,
         method_opt => 'FOR ALL COLUMNS SIZE AUTO'
     );
+
 END;
 /
 
@@ -1044,20 +1384,12 @@ WHERE col_a BETWEEN 1 AND 20;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T19_CLUSTERING_FACTOR','Clustering Factor');
 
---------------------------------------------------------------------------------
--- Show clustering factor
---------------------------------------------------------------------------------
-
-COLUMN INDEX_NAME FORMAT A30
-COLUMN TABLE_NAME FORMAT A25
+PROMPT
+PROMPT ============================================================
+PROMPT CLUSTERING FACTOR
+PROMPT ============================================================
 
 SELECT index_name,
        table_name,
@@ -1068,66 +1400,56 @@ FROM user_indexes
 WHERE index_name = 'OJ_CLUSTERING_I';
 
 --------------------------------------------------------------------------------
--- 24. TEST 20 - SPARSE / LOW COVERAGE INDEX
---
--- Only a small percentage of rows match FLAG='Y'.
+-- T20 - SELECTIVE INDEX
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 CREATE INDEX oj_sales_flag_i
     ON oj_sales(flag);
 
 BEGIN
-    DBMS_STATS.GATHER_TABLE_STATS(
+
+    DBMS_STATS.GATHER_TABLE_STATS
+    (
         ownname    => USER,
         tabname    => 'OJ_SALES',
         cascade    => TRUE,
         method_opt => 'FOR ALL COLUMNS SIZE AUTO'
     );
+
 END;
 /
 
-EXEC trace_on('T20_SPARSE_SELECTIVE_INDEX');
+EXEC trace_on('T20_SELECTIVE_INDEX');
 
-SELECT /* T20_SPARSE_SELECTIVE_INDEX */
+SELECT /* T20_SELECTIVE_INDEX */
        COUNT(*)
 FROM oj_sales
 WHERE flag = 'Y';
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T20_SELECTIVE_INDEX','Selective Index');
 
 --------------------------------------------------------------------------------
--- 25. TEST 21 - NON-SELECTIVE INDEX
---
--- Same index but predicate matches almost all rows.
+-- T21 - NON-SELECTIVE INDEX
+-- ============================================================================
 --------------------------------------------------------------------------------
 
-EXEC trace_on('T21_NONSELECTIVE_INDEX');
+EXEC trace_on('T21_NONSEL_INDEX');
 
-SELECT /* T21_NONSELECTIVE_INDEX */
+SELECT /* T21_NONSEL_INDEX */
        COUNT(*)
 FROM oj_sales
 WHERE flag = 'N';
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T21_NONSEL_INDEX','Non-Selective Index');
 
 --------------------------------------------------------------------------------
--- 26. TEST 22 - INDEX VS FULL TABLE SCAN
+-- T22 - INDEX VS FULL TABLE SCAN
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T22_INDEX_VS_FTS');
@@ -1139,16 +1461,11 @@ WHERE customer_id = 12345;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T22_INDEX_VS_FTS','Index vs Full Table Scan');
 
 --------------------------------------------------------------------------------
--- 27. TEST 23 - FUNCTION ON COLUMN / ACCESS PATH PROBLEM
+-- T23 - FUNCTION ON COLUMN
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T23_FUNCTION_COLUMN');
@@ -1160,18 +1477,11 @@ WHERE TRUNC(order_date) = DATE '2025-01-01';
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T23_FUNCTION_COLUMN','Function Applied to Column');
 
 --------------------------------------------------------------------------------
--- 28. TEST 24 - SARGABLE VERSION
---
--- Compare with T23.
+-- T24 - SARGABLE PREDICATE
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T24_SARGABLE_DATE');
@@ -1180,32 +1490,32 @@ SELECT /* T24_SARGABLE_DATE */
        COUNT(*)
 FROM oj_orders
 WHERE order_date >= DATE '2025-01-01'
-  AND order_date <  DATE '2025-01-02';
+  AND order_date < DATE '2025-01-02';
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T24_SARGABLE_DATE','SARGable Date Predicate');
 
 --------------------------------------------------------------------------------
--- 29. TEST 25 - ADAPTIVE / STATISTICS FEEDBACK OBSERVATION
---
--- This is intentionally not forced.
---
--- Depending on optimizer settings / compatibility / execution history,
--- Oracle may use statistics feedback or other adaptive behavior.
---
--- Execute multiple times.
+-- T25 - ADAPTIVE PLAN
+-- ============================================================================
 --------------------------------------------------------------------------------
 
-ALTER SESSION SET optimizer_adaptive_plans = TRUE;
+BEGIN
 
-ALTER SESSION SET optimizer_adaptive_statistics = TRUE;
+    BEGIN
+        EXECUTE IMMEDIATE
+            'ALTER SESSION SET optimizer_adaptive_plans = TRUE';
+    EXCEPTION
+        WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE(
+                'optimizer_adaptive_plans could not be set: ' ||
+                SQLERRM
+            );
+    END;
+
+END;
+/
 
 EXEC trace_on('T25_ADAPTIVE_FEATURES');
 
@@ -1220,42 +1530,11 @@ GROUP BY c.region;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE +REPORT'
-    )
-);
+EXEC show_test_plan('T25_ADAPTIVE_FEATURES','Adaptive Plan');
 
 --------------------------------------------------------------------------------
--- Execute again so that feedback/adaptive behavior can be observed where
--- applicable.
---------------------------------------------------------------------------------
-
-EXEC trace_on('T25_ADAPTIVE_FEATURES_SECOND_EXEC');
-
-SELECT /* T25_ADAPTIVE_FEATURES_SECOND_EXEC */
-       c.region,
-       COUNT(*)
-FROM oj_customer c
-JOIN oj_orders o
-  ON o.customer_id = c.customer_id
-WHERE o.amount > 9900
-GROUP BY c.region;
-
-EXEC trace_off;
-
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE +REPORT'
-    )
-);
-
---------------------------------------------------------------------------------
--- 30. TEST 26 - JOIN ORDER
+-- T26 - JOIN ORDER
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T26_JOIN_ORDER');
@@ -1274,16 +1553,11 @@ WHERE c.region = 'NORTH'
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T26_JOIN_ORDER','Optimizer Join Order');
 
 --------------------------------------------------------------------------------
--- 31. TEST 27 - FORCED JOIN ORDER
+-- T27 - FORCED JOIN ORDER
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T27_FORCED_JOIN_ORDER');
@@ -1303,19 +1577,11 @@ WHERE c.region = 'NORTH'
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T27_FORCED_JOIN_ORDER','Forced Join Order');
 
 --------------------------------------------------------------------------------
--- 32. TEST 28 - NESTED LOOP VS HASH JOIN
---
--- Same logical query.
--- Explicitly compare both strategies.
+-- T28A - FORCE NESTED LOOP
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T28A_FORCE_NL');
@@ -1330,13 +1596,12 @@ WHERE c.customer_id BETWEEN 1 AND 1000;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T28A_FORCE_NL','Forced Nested Loop');
+
+--------------------------------------------------------------------------------
+-- T28B - FORCE HASH
+-- ============================================================================
+--------------------------------------------------------------------------------
 
 EXEC trace_on('T28B_FORCE_HASH');
 
@@ -1350,18 +1615,11 @@ WHERE c.customer_id BETWEEN 1 AND 1000;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T28B_FORCE_HASH','Forced Hash Join');
 
 --------------------------------------------------------------------------------
--- 33. TEST 29 - SQL TRANSFORMATION COMBINATION
---
--- View + EXISTS + predicates.
+-- T29 - COMBINED TRANSFORMATIONS
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 EXEC trace_on('T29_COMBINED_TRANSFORMATIONS');
@@ -1369,12 +1627,14 @@ EXEC trace_on('T29_COMBINED_TRANSFORMATIONS');
 SELECT /* T29_COMBINED_TRANSFORMATIONS */
        v.region,
        COUNT(*)
-FROM (
+FROM
+(
     SELECT c.customer_id,
            c.region
     FROM oj_customer c
     WHERE c.status = 'ACTIVE'
-      AND EXISTS (
+      AND EXISTS
+      (
           SELECT 1
           FROM oj_orders o
           WHERE o.customer_id = c.customer_id
@@ -1388,26 +1648,22 @@ GROUP BY v.region;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T29_COMBINED_TRANSFORMATIONS','Combined Transformations');
 
 --------------------------------------------------------------------------------
--- 34. TEST 30 - CARDINALITY + JOIN METHOD
---
--- Deliberately bad statistics on one side.
+-- T30 - BAD CARDINALITY + JOIN
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 BEGIN
-    DBMS_STATS.SET_TABLE_STATS(
+
+    DBMS_STATS.SET_TABLE_STATS
+    (
         ownname => USER,
         tabname => 'OJ_SMALL',
         numrows => 1
     );
+
 END;
 /
 
@@ -1422,115 +1678,162 @@ WHERE s.group_id BETWEEN 1 AND 100;
 
 EXEC trace_off;
 
-SELECT *
-FROM TABLE(
-    DBMS_XPLAN.DISPLAY_CURSOR(
-        NULL,NULL,
-        'ALLSTATS LAST +OUTLINE +NOTE'
-    )
-);
+EXEC show_test_plan('T30_BAD_CARDINALITY_JOIN','Bad Cardinality + Join');
 
 --------------------------------------------------------------------------------
--- 35. RESTORE GOOD STATISTICS
+-- ============================================================================
+-- SECTION 13 - RESULTS
+-- ============================================================================
 --------------------------------------------------------------------------------
 
-BEGIN
-    DBMS_STATS.GATHER_SCHEMA_STATS(
-        ownname          => USER,
-        estimate_percent => DBMS_STATS.AUTO_SAMPLE_SIZE,
-        method_opt       => 'FOR ALL COLUMNS SIZE AUTO',
-        cascade          => TRUE,
-        no_invalidate    => FALSE
-    );
-END;
-/
+PROMPT
+PROMPT ============================================================
+PROMPT ALL TEST RESULTS
+PROMPT ============================================================
+
+COLUMN test_id FORMAT A32
+COLUMN test_description FORMAT A45
+COLUMN sql_id FORMAT A13
+COLUMN child_number FORMAT 999
+COLUMN plan_hash_value FORMAT 9999999999
+COLUMN executions FORMAT 999999
+COLUMN buffer_gets FORMAT 999999999999
+COLUMN disk_reads FORMAT 999999999999
+COLUMN rows_processed FORMAT 999999999999
+
+SELECT
+    test_id,
+    test_description,
+    sql_id,
+    child_number,
+    plan_hash_value,
+    executions,
+    buffer_gets,
+    disk_reads,
+    rows_processed
+FROM oj_trace_results
+ORDER BY run_time;
 
 --------------------------------------------------------------------------------
--- 36. DISPLAY IMPORTANT OPTIMIZER SETTINGS
+-- ============================================================================
+-- SECTION 14 - SQL_ID LOOKUP
+-- ============================================================================
 --------------------------------------------------------------------------------
 
-COLUMN NAME FORMAT A45
-COLUMN VALUE FORMAT A60
+PROMPT
+PROMPT ============================================================
+PROMPT TEST SQL_ID CATALOG
+PROMPT ============================================================
 
-SELECT name, value
-FROM v$parameter
-WHERE name IN (
-    'optimizer_features_enable',
-    'optimizer_mode',
-    'optimizer_dynamic_sampling',
-    'optimizer_adaptive_plans',
-    'optimizer_adaptive_statistics',
-    'statistics_level',
-    'cursor_sharing'
-)
-ORDER BY name;
+SELECT
+    test_id,
+    sql_id,
+    child_number,
+    plan_hash_value
+FROM oj_trace_results
+ORDER BY test_id;
 
 --------------------------------------------------------------------------------
--- 37. TRACE FILE LOCATION
+-- ============================================================================
+-- SECTION 15 - TRACE FILE
+-- ============================================================================
 --------------------------------------------------------------------------------
 
-SELECT name, value
+PROMPT
+PROMPT ============================================================
+PROMPT TRACE FILE
+PROMPT ============================================================
+
+SELECT
+    name,
+    value
 FROM v$diag_info
-WHERE name IN (
+WHERE name IN
+(
     'Diag Trace',
     'Default Trace File',
     'Default Trace Directory'
 );
 
 --------------------------------------------------------------------------------
--- 38. CURRENT SESSION INFORMATION
+-- ============================================================================
+-- SECTION 16 - SESSION INFORMATION
+-- ============================================================================
 --------------------------------------------------------------------------------
 
-SELECT sid,
-       serial#,
-       sql_id,
-       prev_sql_id,
-       module,
-       action
+PROMPT
+PROMPT ============================================================
+PROMPT SESSION
+PROMPT ============================================================
+
+SELECT
+    sid,
+    serial#,
+    sql_id,
+    prev_sql_id,
+    module,
+    action
 FROM v$session
 WHERE sid = SYS_CONTEXT('USERENV','SID');
 
 --------------------------------------------------------------------------------
--- END
+-- ============================================================================
+-- SECTION 17 - TRACE SEARCH TERMS
+-- ============================================================================
 --------------------------------------------------------------------------------
 
 PROMPT
 PROMPT ============================================================
-PROMPT OPTIMIZER TRACE LAB COMPLETE
+PROMPT USEFUL 10053 TRACE SEARCH TERMS
 PROMPT ============================================================
 PROMPT
-PROMPT Important trace IDs:
+PROMPT Query Transformation
+PROMPT CBQT
+PROMPT View Merging
+PROMPT Subquery Unnesting
+PROMPT Predicate Move-Around
+PROMPT Predicate Push
+PROMPT OR Expansion
+PROMPT Join Elimination
+PROMPT Transitive
+PROMPT Join order
+PROMPT Join costing
+PROMPT Access path
+PROMPT Nested Loops
+PROMPT Hash Join
+PROMPT Sort Merge
+PROMPT Cartesian
+PROMPT Card
+PROMPT Selectivity
+PROMPT Histogram
+PROMPT Clustering factor
+PROMPT Dynamic sampling
+PROMPT Statistics feedback
+PROMPT Adaptive
 PROMPT
-PROMPT T01  Nested Loop
-PROMPT T02  Hash Join
-PROMPT T03  Sort Merge Join
-PROMPT T04  Cartesian Join
-PROMPT T05  View Merging
-PROMPT T06  No View Merging
-PROMPT T07  Subquery Unnesting
-PROMPT T08  No Unnest
-PROMPT T09  Predicate Pushing
-PROMPT T10  OR Expansion
-PROMPT T11  Join Elimination
-PROMPT T12  Predicate Transitivity
-PROMPT T13  Missing Index
-PROMPT T14  Missing Statistics
-PROMPT T15  Stale Statistics
-PROMPT T16  Bad Table Statistics
-PROMPT T17  Cardinality Misestimate / No Histogram
-PROMPT T18  Histogram
-PROMPT T19  Bad Clustering Factor
-PROMPT T20  Selective/Sparse Index
-PROMPT T21  Non-selective Index
-PROMPT T22  Index vs Full Table Scan
-PROMPT T23  Function on Column
-PROMPT T24  SARGable Predicate
-PROMPT T25  Adaptive Features
-PROMPT T26  Join Order
-PROMPT T27  Forced Join Order
-PROMPT T28  NL vs Hash
-PROMPT T29  Combined Transformations
-PROMPT T30  Bad Cardinality + Join
-PROMPT
-PROMPT Use V$DIAG_INFO to locate 10046/10053 trace files.
 PROMPT ============================================================
+
+--------------------------------------------------------------------------------
+-- ============================================================================
+-- SECTION 18 - FINAL TRACE OFF
+-- ============================================================================
+--------------------------------------------------------------------------------
+
+EXEC trace_off;
+
+PROMPT
+PROMPT ============================================================
+PROMPT LAB COMPLETE
+PROMPT ============================================================
+PROMPT
+PROMPT 10053 = optimizer decisions
+PROMPT 10046 = SQL execution / waits / binds
+PROMPT
+PROMPT Results are stored in OJ_TRACE_RESULTS.
+PROMPT
+PROMPT IMPORTANT:
+PROMPT The test SQL_ID is found by its LAB tag.
+PROMPT DBMS_XPLAN does NOT use NULL,NULL.
+PROMPT
+PROMPT ============================================================
+```
